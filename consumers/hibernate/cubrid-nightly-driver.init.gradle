@@ -1,0 +1,21 @@
+// Run the Hibernate suite against the JDBC driver that shipped inside the
+// nightly engine image, so the engine and the driver under test come from one
+// build. Applied with --init-script, so no file in hibernate-orm changes.
+//
+// The jar itself is served by hibernate's own ADDITIONAL_REPO hook, a flatDir
+// repository it already provides "to load JDBC drivers which can not be
+// distributed in public". Only the requested version has to be rewritten,
+// because gradle/libs.versions.toml pins a released one and
+// settings.gradle's overrideableVersion list does not include cubrid.
+def version = System.getProperty('cubrid.driver.version')
+
+allprojects {
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { d ->
+            if (d.requested.group == 'org.cubrid' && d.requested.name == 'cubrid-jdbc') {
+                d.useVersion version
+                d.because 'driver taken from the nightly engine image'
+            }
+        }
+    }
+}

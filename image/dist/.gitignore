@@ -1,0 +1,3 @@
+# The pipeline downloads the engine package here at build time. Do not commit it.
+*
+!.gitignore

@@ -1,0 +1,23 @@
+// Point testcontainers-cubrid at a driver installed into a local Maven repo,
+// typically the one extracted from the nightly image. No source change.
+def repo = System.getProperty('nightly.driver.repo')
+def version = System.getProperty('nightly.driver.version')
+
+allprojects {
+    repositories {
+        maven {
+            name = 'nightlyDriver'
+            url = uri(repo)
+            metadataSources { mavenPom(); artifact() }
+            content { includeModule('org.cubrid', 'cubrid-jdbc') }
+        }
+    }
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { d ->
+            if (d.requested.group == 'org.cubrid' && d.requested.name == 'cubrid-jdbc') {
+                d.useVersion version
+                d.because 'driver taken from the nightly engine image'
+            }
+        }
+    }
+}

@@ -1,0 +1,711 @@
+{
+  "title": "CUBRID Nightly 개발 이미지 구축 결과",
+  "subtitle": "계획서(2026-09-08) 이후 구현과 검증 기록",
+  "meta": "CUBRID Dev1 · 작성일 2026-09-10",
+  "header": "CUBRID Nightly 개발 이미지 구축 결과",
+  "auto_number": true,
+  "conclusion": "파이프라인이 매일 스스로 돌고 있고, 그 이미지로 Testcontainers 스위트가 릴리스와 똑같이 통과한다. 남에게 할 요청은 결과적으로 하나도 남지 않았다. 다만 계획서의 설계 결정 세 가지는 실측 결과 틀린 것으로 드러나 바로잡았다.",
+  "blocks": [
+    {
+      "t": "h1",
+      "text": "개요"
+    },
+    {
+      "t": "p",
+      "text": "계획서에서 정한 1단계(nightly 개발 이미지를 매일 발행)를 구현하고 GitHub에서 실제로 돌렸다. 계획 대비 달라진 부분과 그 근거, 실측 수치, 그리고 이어서 검토한 JDBC 확장안을 정리한다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "항목",
+        "상태",
+        "내용"
+      ],
+      "aligns": [
+        "left",
+        "center",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "이미지 발행",
+            "완료",
+            "ghcr.io/srltas/cubrid-nightly, 공개, 익명 pull 가능"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "자동 실행",
+            "완료",
+            "하루 2회, 첫 정기 실행 성공 확인"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "Testcontainers 검증",
+            "완료",
+            "릴리스와 동일하게 9건 전부 통과"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "JDBC 확장",
+            "검토 완료",
+            "채택안 실증까지 완료, 자동화는 미착수"
+          ],
+          "status": "warn"
+        },
+        {
+          "cells": [
+            "본 저장소 착지",
+            "미착수",
+            "현재는 개인 fork 에서만 동작"
+          ],
+          "status": "warn"
+        }
+      ]
+    },
+    {
+      "t": "note",
+      "kind": "info",
+      "text": "이 문서의 모든 수치는 실제 실행으로 측정한 값이다. 계획서에 있던 값 중 실측과 다른 것은 4장에 따로 정리했다."
+    },
+    {
+      "t": "h1",
+      "text": "만들어진 것"
+    },
+    {
+      "t": "p",
+      "text": "**엔진을 다시 빌드하지 않는다**는 계획의 핵심은 그대로 유지됐다. 새로 만든 것은 포장 단계 하나뿐이다."
+    },
+    {
+      "t": "svg",
+      "width_in": 6.4,
+      "caption": "그림 1. 전체 흐름. 초록은 이미 매일 돌고 있던 것, 파랑이 새로 만든 것.",
+      "code": "<svg viewBox=\"0 0 880 340\" xmlns=\"http://www.w3.org/2000/svg\"><defs><marker id=\"ab\" markerWidth=\"9\" markerHeight=\"9\" refX=\"8\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L8,3 L0,6 z\" fill=\"#2E6DA4\"/></marker></defs><rect x=\"40\" y=\"40\" width=\"220\" height=\"70\" rx=\"9\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"150\" y=\"70\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">사내 Jenkins</text><text x=\"150\" y=\"92\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">평일 저녁 엔진 빌드</text><rect x=\"340\" y=\"40\" width=\"220\" height=\"70\" rx=\"9\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"450\" y=\"70\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">ftp.cubrid.org</text><text x=\"450\" y=\"92\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">빌드별 패키지, hash.md5</text><line x1=\"262\" y1=\"75\" x2=\"334\" y2=\"75\" stroke=\"#2E6DA4\" stroke-width=\"2\" marker-end=\"url(#ab)\"/><polyline points=\"450,112 450,155 160,155 160,196\" fill=\"none\" stroke=\"#2E6DA4\" stroke-width=\"2\" marker-end=\"url(#ab)\"/><rect x=\"40\" y=\"200\" width=\"240\" height=\"70\" rx=\"9\" fill=\"#EAF1F8\" stroke=\"#2E6DA4\" stroke-width=\"2\"/><text x=\"160\" y=\"230\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">GitHub Actions</text><text x=\"160\" y=\"252\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">검증, 빌드, smoke, 발행, 정리</text><line x1=\"282\" y1=\"235\" x2=\"334\" y2=\"235\" stroke=\"#2E6DA4\" stroke-width=\"2\" marker-end=\"url(#ab)\"/><rect x=\"340\" y=\"200\" width=\"180\" height=\"70\" rx=\"9\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"430\" y=\"230\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">GHCR</text><text x=\"430\" y=\"252\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">공개, 익명 pull</text><line x1=\"522\" y1=\"235\" x2=\"574\" y2=\"235\" stroke=\"#2E6DA4\" stroke-width=\"2\" marker-end=\"url(#ab)\"/><rect x=\"580\" y=\"200\" width=\"260\" height=\"70\" rx=\"9\" fill=\"#FFFFFF\" stroke=\"#1F3864\" stroke-width=\"2\"/><text x=\"710\" y=\"230\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">Testcontainers, Hibernate</text><text x=\"710\" y=\"252\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">호환성 검증</text><rect x=\"580\" y=\"302\" width=\"16\" height=\"16\" rx=\"3\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"604\" y=\"315\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">이미 있음</text><rect x=\"692\" y=\"302\" width=\"16\" height=\"16\" rx=\"3\" fill=\"#EAF1F8\" stroke=\"#2E6DA4\" stroke-width=\"2\"/><text x=\"716\" y=\"315\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"13\" fill=\"#1F3864\">새로 만든 것</text></svg>"
+    },
+    {
+      "t": "table",
+      "header": [
+        "저장소",
+        "파일",
+        "역할"
+      ],
+      "aligns": [
+        "left",
+        "left",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "Srltas/cubrid",
+            ".github/workflows/nightly-image.yml",
+            "파이프라인 (374줄)"
+          ]
+        },
+        {
+          "cells": [
+            "Srltas/cubrid-docker",
+            "nightly/Dockerfile",
+            "이미지 정의"
+          ]
+        },
+        {
+          "cells": [
+            "Srltas/cubrid-docker",
+            "nightly/docker-entrypoint.sh, cubrid.sh",
+            "기동 스크립트"
+          ]
+        },
+        {
+          "cells": [
+            "Srltas/cubrid-docker",
+            "nightly/smoke.sh",
+            "이미지 검사 6종"
+          ]
+        },
+        {
+          "cells": [
+            "Srltas/cubrid-docker",
+            "nightly/dist/.gitignore",
+            "패키지 커밋 방지"
+          ]
+        }
+      ]
+    },
+    {
+      "t": "p",
+      "text": "태그는 세 종류다. 불변 태그 이름은 **ftp 디렉터리 이름과 완전히 같은 문자열**이라, 하나의 식별자가 ftp, 이미지 저장소, 로그, 알림에 그대로 등장한다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "태그",
+        "성격",
+        "현재 값"
+      ],
+      "aligns": [
+        "left",
+        "center",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "11.5.0.2552-aef5776",
+            "불변",
+            "2026-09-09 빌드"
+          ]
+        },
+        {
+          "cells": [
+            "nightly",
+            "이동",
+            "검증을 통과한 최신"
+          ]
+        },
+        {
+          "cells": [
+            "latest",
+            "이동",
+            "nightly 의 별칭"
+          ]
+        }
+      ]
+    },
+    {
+      "t": "h1",
+      "text": "검증 결과"
+    },
+    {
+      "t": "h2",
+      "text": "3.1 이미지 자체"
+    },
+    {
+      "t": "chart",
+      "kind": "bar",
+      "title": "이미지 크기",
+      "subtitle": "docker image inspect 기준, 같은 척도",
+      "note": "진단 도구를 빼고 2단계 빌드로 패키지를 최종 이미지에 남기지 않은 결과",
+      "bars": [
+        {
+          "label": "릴리스 11.4",
+          "value": 563,
+          "color": "base"
+        },
+        {
+          "label": "nightly",
+          "value": 370,
+          "color": "good",
+          "badge": "34% 작음"
+        }
+      ]
+    },
+    {
+      "t": "p",
+      "text": "16개 항목을 실측했고 전부 통과했다. 주요 값만 옮긴다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "항목",
+        "결과",
+        "값"
+      ],
+      "aligns": [
+        "left",
+        "center",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "ftp hash.md5 대조",
+            "통과",
+            "일치"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "기동 완료까지",
+            "통과",
+            "6초"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "엔진 버전이 요청한 빌드와 일치",
+            "통과",
+            "cubrid_rel 확인"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "JDBC 접속 (이미지 내장 드라이버)",
+            "통과",
+            "server 11.5.0.2552"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "재시작 후 데이터 보존",
+            "통과",
+            "재초기화 없음"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "서버 중단 시 unhealthy 판정",
+            "통과",
+            "31초"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "릴리스에 없는 패키지",
+            "통과",
+            "0개 (154 대 224)"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "h2",
+      "text": "3.2 자동 실행"
+    },
+    {
+      "t": "table",
+      "header": [
+        "일시 (UTC)",
+        "방식",
+        "결과",
+        "비고"
+      ],
+      "aligns": [
+        "left",
+        "center",
+        "center",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "09-08 09:39",
+            "수동",
+            "실패",
+            "epel 미러 404, 해당 저장소 의존 제거"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "09-08 14:17",
+            "수동",
+            "성공",
+            "첫 발행"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "09-08 14:23",
+            "수동",
+            "성공",
+            "이미 발행됨을 감지하고 건너뜀"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "09-09 19:19",
+            "정기",
+            "성공",
+            "사람 개입 없이 새 빌드 발행"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "p",
+      "text": "정기 실행에서 **이동 태그만 새 빌드로 옮겨가고 이전 빌드의 불변 태그는 그대로 남는 것**을 확인했다. 예약 시각은 16:23 UTC 였으나 실제 실행은 19:19 UTC 였다. GitHub 정기 실행은 보장 시각이 아니라 부하에 따라 밀린다."
+    },
+    {
+      "t": "h2",
+      "text": "3.3 Testcontainers 스위트"
+    },
+    {
+      "t": "p",
+      "text": "CUBRID/testcontainers-cubrid 의 9개 테스트(컨테이너 수명주기 5건, HA 클러스터 3건, jdbc:tc URL 1건)를 세 조합으로 돌렸다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "조합",
+        "엔진",
+        "드라이버",
+        "결과",
+        "소요"
+      ],
+      "aligns": [
+        "left",
+        "left",
+        "left",
+        "center",
+        "center"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "기준선",
+            "릴리스 11.4",
+            "11.3.2.0053",
+            "9 / 9",
+            "1분 40초"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "엔진만 교체",
+            "11.5.0.2552",
+            "11.3.2.0053",
+            "9 / 9",
+            "1분 27초"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "엔진 + 드라이버",
+            "11.5.0.2552",
+            "11.4.0.0077",
+            "9 / 9",
+            "1분 28초"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "note",
+      "kind": "info",
+      "text": "두 세대 뒤진 11.3 드라이버가 11.5 develop 엔진에 정상 접속하고, HA 클러스터 구성과 마스터 장애 시 승격까지 동작한다. 현재 시점에서 다음 버전은 Testcontainers 호환성을 깨뜨리지 않는다."
+    },
+    {
+      "t": "p",
+      "text": "소비자 저장소는 **한 줄도 고치지 않았다.** 이미지는 Testcontainers 의 ImageNameSubstitutor, 드라이버는 Gradle init script 로 바꿔치기했다. 되돌리려면 파일을 지우거나 옵션을 빼면 된다."
+    },
+    {
+      "t": "h1",
+      "text": "계획과 달라진 것"
+    },
+    {
+      "t": "p",
+      "text": "계획서를 그대로 구현했다면 조용히 고장 났을 결정이 세 가지 있었다. 전부 실측으로 드러났다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "항목",
+        "계획",
+        "실제로 한 것",
+        "이유"
+      ],
+      "aligns": [
+        "left",
+        "left",
+        "left",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "오래된 이미지 정리",
+            "min-versions-to-keep: 15",
+            "이동 태그를 제외하고 직접 계산",
+            "순위가 최초 발행 시각 기준이라 nightly 가 가리키는 이미지가 밀려나 삭제됨"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "기동 스크립트",
+            "릴리스 파일을 그대로 사용",
+            "nightly 가 자체 보유",
+            "릴리스 11.4 는 출시된 기동 계약이라 새 엔진 때문에 수정할 수 없음"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "설치 패키지",
+            "명시 안 함",
+            "릴리스에 없는 3개 제거",
+            "릴리스에 없는 패키지를 넣으면 엔진이 새 의존성을 가져도 nightly 만 통과함"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "파일 수",
+            "2개",
+            "3개 (smoke.sh 추가)",
+            "검사 항목은 파이프라인이 아니라 이미지에 따라 바뀜"
+          ],
+          "status": "warn"
+        },
+        {
+          "cells": [
+            "타인에게 할 요청",
+            "1회 (패키지 공개 전환)",
+            "0회",
+            "개인 fork 가 public 이라 패키지가 처음부터 public 으로 생성됨"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "note",
+      "kind": "bad",
+      "text": "첫 항목이 가장 위험했다. 컨테이너 이미지 버전의 순위는 최초 발행 시각으로 매겨지고, 태그를 옮겨도 그 시각은 움직이지 않는다. 검증 실패가 15회 이어지면 nightly 가 가리키던 이미지가 보존 범위 밖으로 밀려나 삭제되고 이동 태그가 깨진다. 합성 데이터로 재현해 확인했다."
+    },
+    {
+      "t": "p",
+      "text": "그 밖에 첫 파이프라인 실행이 실패하면서 드러난 것이 하나 더 있다. Dockerfile 이 epel 저장소를 참조하고 있었는데 **우리가 그 저장소에서 가져오는 패키지는 하나도 없었다.** 로컬에서는 해당 계층이 캐시되어 한 번도 실제로 접속한 적이 없었다. 빨간불은 엔진이 깨졌다는 뜻이어야 하므로 의존을 제거했다. 참고로 릴리스 Dockerfile 에도 같은 줄이 있다."
+    },
+    {
+      "t": "h1",
+      "text": "JDBC 확장 검토"
+    },
+    {
+      "t": "h2",
+      "text": "5.1 엔진과 같은 방식은 성립하지 않는다"
+    },
+    {
+      "t": "p",
+      "text": "엔진이 잘 된 이유는 GHCR 이 **공개 이미지를 익명으로 내주기** 때문이다. GitHub 의 Maven 레지스트리는 그렇지 않다. 공개 패키지 2건으로 각각 확인했다."
+    },
+    {
+      "t": "code",
+      "text": "ghcr.io                 익명 토큰 발급 -> manifest 200\nmaven.pkg.github.com    Authorization 없음 -> 401\n                        www-authenticate: Basic realm=\"GitHub Package Registry\""
+    },
+    {
+      "t": "p",
+      "text": "공식 문서도 명시한다. \"You need an access token to publish, install, and delete private, internal, and public packages.\" 즉 자격증명 없이 끝난다는 엔진 설계의 전제가 여기서는 깨진다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "배포 방법",
+        "익명 해석",
+        "판정"
+      ],
+      "aligns": [
+        "left",
+        "center",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "GitHub Packages (Maven)",
+            "불가",
+            "공개 패키지도 401"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "Maven Central",
+            "가능",
+            "Sonatype 계정과 org.cubrid 좌표 권한 필요"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "ftp 에 드라이버 nightly 영역",
+            "가능",
+            "사내 인프라 권한 필요"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "JitPack",
+            "가능",
+            "CUBRID 저장소에 설정 파일 추가 필요, 기존 시도 4건 전부 실패"
+          ],
+          "status": "bad"
+        },
+        {
+          "cells": [
+            "GitHub Releases 첨부",
+            "가능",
+            "Maven 좌표로는 해석 불가"
+          ],
+          "status": "warn"
+        },
+        {
+          "cells": [
+            "GitHub Pages 에 Maven 저장소",
+            "가능",
+            "유일하게 제약을 모두 만족, 실측 확인"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "h2",
+      "text": "5.2 채택안: 이미지에서 꺼내 쓴다"
+    },
+    {
+      "t": "p",
+      "text": "그런데 발행이 정말 필요한지 따져보니, **아무것도 새로 발행하지 않고 목적을 달성할 수 있었다.** 지금 만드는 nightly 이미지 안에 이미 그날의 JDBC 드라이버가 들어 있다."
+    },
+    {
+      "t": "svg",
+      "width_in": 5.8,
+      "caption": "그림 2. 엔진과 드라이버를 같은 이미지에서 꺼내면 실제로 출시될 짝을 그대로 검증하게 된다.",
+      "code": "<svg viewBox=\"0 0 820 250\" xmlns=\"http://www.w3.org/2000/svg\"><defs><marker id=\"a2\" markerWidth=\"9\" markerHeight=\"9\" refX=\"8\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L8,3 L0,6 z\" fill=\"#2E6DA4\"/></marker></defs><rect x=\"40\" y=\"35\" width=\"340\" height=\"180\" rx=\"9\" fill=\"#FFFFFF\" stroke=\"#2E6DA4\" stroke-width=\"2\"/><text x=\"210\" y=\"66\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">nightly 이미지</text><rect x=\"64\" y=\"84\" width=\"292\" height=\"52\" rx=\"9\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"210\" y=\"116\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"15\" fill=\"#1F3864\">엔진 11.5.0.2552-aef5776</text><rect x=\"64\" y=\"150\" width=\"292\" height=\"52\" rx=\"9\" fill=\"#E2EFDA\" stroke=\"#2EA84F\" stroke-width=\"2\"/><text x=\"210\" y=\"182\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"15\" fill=\"#1F3864\">JDBC 11.4.0.0077</text><line x1=\"384\" y1=\"125\" x2=\"534\" y2=\"125\" stroke=\"#2E6DA4\" stroke-width=\"2\" marker-end=\"url(#a2)\"/><rect x=\"540\" y=\"90\" width=\"250\" height=\"70\" rx=\"9\" fill=\"#EAF1F8\" stroke=\"#2E6DA4\" stroke-width=\"2\"/><text x=\"665\" y=\"120\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"17\" font-weight=\"bold\" fill=\"#1F3864\">Testcontainers 스위트</text><text x=\"665\" y=\"142\" text-anchor=\"middle\" font-family=\"'맑은 고딕','Malgun Gothic','Apple SD Gothic Neo',sans-serif\" font-size=\"15\" fill=\"#2EA84F\">9 / 9 통과</text></svg>"
+    },
+    {
+      "t": "p",
+      "text": "컨테이너를 띄우지 않고 파일만 꺼내 Gradle 이 해석하도록 바꿔치기한다. **새로 만드는 것도, 발행하는 것도 없다.** 실행해서 확인했고 3장 표의 세 번째 행이 그 결과다."
+    },
+    {
+      "t": "table",
+      "header": [
+        "확인 항목",
+        "결과"
+      ],
+      "aligns": [
+        "left",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "의존성 치환",
+            "11.3.2.0053 에서 11.4.0.0077 로, 사유까지 기록됨"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "실제 classpath",
+            "릴리스 드라이버 없음, 치환된 것 하나뿐"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "음성 대조 (없는 버전 지정)",
+            "조용히 넘어가지 않고 해석 실패"
+          ],
+          "status": "good"
+        },
+        {
+          "cells": [
+            "소비자 저장소 변경",
+            "추적 파일 무변경"
+          ],
+          "status": "good"
+        }
+      ]
+    },
+    {
+      "t": "note",
+      "kind": "warn",
+      "text": "이 방식은 통합된 드라이버의 회귀를 릴리스 전에 잡는 것이지, 머지 전에 미리 잡는 것은 아니다. 서브모듈 반영을 기다려야 하므로 최근 57일 중 24일이 사각지대였다."
+    },
+    {
+      "t": "p",
+      "text": "여러 커밋이 한 번에 묶이면 중간 커밋은 어디에도 산출물이 남지 않는다. 그 구간까지 보려면 드라이버를 직접 빌드하는 축을 추가하면 되고, 두 방식은 배타적이지 않다."
+    },
+    {
+      "t": "p",
+      "text": "또한 이 9개 테스트는 컨테이너 수명주기와 HA 를 보는 스위트라 **JDBC 적합성 검증이 아니다.** 접속이 되지 않는 수준의 회귀는 잡지만 세밀한 타입 처리 회귀는 잡지 못한다. 거기까지는 Hibernate 가 본진이다."
+    },
+    {
+      "t": "h1",
+      "text": "남은 단계"
+    },
+    {
+      "t": "table",
+      "header": [
+        "단계",
+        "내용",
+        "선행 조건"
+      ],
+      "aligns": [
+        "left",
+        "left",
+        "left"
+      ],
+      "rows": [
+        {
+          "cells": [
+            "1",
+            "JDBC 검증을 워크플로로 자동화",
+            "없음, 수동 절차는 검증 완료"
+          ]
+        },
+        {
+          "cells": [
+            "2",
+            "Hibernate 로 확장",
+            "CUBRID/hibernate-orm 의 CUBRID CI 가 5일 연속 실패 중 (테스트가 아니라 브랜치 병합 충돌)"
+          ],
+          "status": "warn"
+        },
+        {
+          "cells": [
+            "3",
+            "본 저장소 착지",
+            "워크플로는 PR 필요, Dockerfile 은 불필요"
+          ]
+        }
+      ]
+    },
+    {
+      "t": "p",
+      "text": "정기 실행에 대해 알아둘 것이 하나 있다. 공개 저장소의 정기 실행은 **60일간 저장소 활동이 없으면 자동 중단**되고 실행 자체는 활동으로 계산되지 않는다. 개인 fork 에서는 언젠가 걸리지만, 본 저장소로 옮기면 매일 갱신되므로 해당 없다."
+    },
+    {
+      "t": "h1",
+      "text": "부록: 재현 명령"
+    },
+    {
+      "t": "p",
+      "text": "이미지 받기와 현재 가리키는 빌드 확인."
+    },
+    {
+      "t": "code",
+      "text": "docker run -d -p 33000:33000 ghcr.io/srltas/cubrid-nightly:nightly\n\ndocker image inspect ghcr.io/srltas/cubrid-nightly:nightly \\\n  --format '{{index .Config.Labels \"org.cubrid.nightly.build_id\"}}'"
+    },
+    {
+      "t": "p",
+      "text": "이미지에서 그날의 JDBC 드라이버 꺼내기. 컨테이너를 띄우지 않는다. 디렉터리째 복사해야 심볼릭 링크가 정상 해석된다."
+    },
+    {
+      "t": "code",
+      "text": "CID=$(docker create ghcr.io/srltas/cubrid-nightly:nightly)\ndocker cp \"$CID:/home/cubrid/CUBRID/jdbc/.\" ./jdbc/\ndocker rm -f \"$CID\""
+    }
+  ]
+}

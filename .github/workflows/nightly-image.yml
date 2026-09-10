@@ -1,0 +1,368 @@
+#
+# Nightly develop image
+#
+# Packages a develop nightly engine build as a container image and publishes it
+# to GHCR. The engine is not rebuilt: the package comes from ftp.cubrid.org and
+# is put into the image defined in image/.
+#
+# Tags
+#   <build id>   immutable, pushed once per build even if the smoke test fails,
+#                so a broken build stays available for investigation
+#   nightly      moves to the newest build that PASSED the smoke test
+#   latest       alias of nightly
+#
+# A green run is silent, so every path that does nothing has to say why. Only a
+# definite answer is allowed to end a run quietly: an unreachable registry or an
+# unexpected ftp reply fails the run instead of looking like a quiet day.
+#
+# Scheduled workflows in a public repository stop after 60 days without
+# repository activity, and the runs themselves do not count as activity.
+#
+name: Nightly develop image
+
+on:
+  # Every day, not weekdays only: a few builds do land at the weekend, and a run
+  # with nothing to do costs about twenty seconds. Off the top of the hour
+  # because GitHub drops queued cron jobs under load.
+  schedule:
+    - cron: '23 16 * * *' # 01:23 KST, after the usual 22:15-22:45 KST publish
+    - cron: '23 3 * * *'  # 12:23 KST, catches a build that landed late
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'Build to publish, e.g. 11.5.0.2539-2ebf5d4. Empty resolves the newest on ftp.'
+        required: false
+        default: ''
+        type: string
+      force:
+        description: 'Build even if the immutable tag already exists'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {} # Least privilege — jobs opt in below
+
+concurrency:
+  group: nightly-image
+  cancel-in-progress: false # never interrupt a push or a version delete
+
+env:
+  FTP_BASE: https://ftp.cubrid.org/CUBRID_Engine/nightly/daily_build
+  BUILD_ID_RE: '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,40}$'
+  IMAGE_NAME: cubrid-nightly
+  KEEP_VERSIONS: 15
+  GHCR_ACCEPT: 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
+
+jobs:
+  plan:
+    name: Decide what to build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: read
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+      retry: ${{ steps.gate.outputs.retry }}
+      build_id: ${{ steps.target.outputs.build_id }}
+      image: ${{ steps.target.outputs.image }}
+      repo: ${{ steps.target.outputs.repo }}
+    steps:
+      - name: Resolve the target build
+        id: target
+        env:
+          OVERRIDE: ${{ inputs.build_id }}
+          OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$OVERRIDE" ]; then
+            build_id=$OVERRIDE
+          else
+            # The index is sorted by name, not by date, and holds several release
+            # series plus a stray "$CUBRID_VERSION" directory left by a broken
+            # build script. Without the strict pattern that stray entry sorts
+            # highest. Every href appears twice, hence sort -u. Develop always
+            # carries the highest version, so no series has to be hardcoded.
+            # grep is wrapped so a zero-match index reaches the guard below
+            # instead of dying on pipefail with an empty log; curl stays its own
+            # pipeline element so a transport failure still propagates.
+            build_id=$(curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+                         --max-time 120 "$FTP_BASE/" \
+              | { grep -oE 'href="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,40}/"' || true; } \
+              | sed -E 's#^href="(.+)/"$#\1#' \
+              | sort -u -V | tail -n1)
+          fi
+          [ -n "$build_id" ] \
+            || { echo "::error::could not resolve a build id from $FTP_BASE/ (index shape changed?)"; exit 1; }
+          # Also applied to a dispatched override: it reaches a docker tag, a URL
+          # and $GITHUB_OUTPUT, and a typo must fail here rather than look like a
+          # build ftp has not published yet.
+          echo "$build_id" | grep -qE "$BUILD_ID_RE" \
+            || { echo "::error::'$build_id' is not a build id"; exit 1; }
+          owner=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "build_id=$build_id"
+            echo "repo=$owner/$IMAGE_NAME"
+            echo "image=ghcr.io/$owner/$IMAGE_NAME"
+          } >> "$GITHUB_OUTPUT"
+          echo "target $build_id"
+
+      - name: Decide whether to build
+        id: gate
+        env:
+          BUILD_ID: ${{ steps.target.outputs.build_id }}
+          GHCR_REPO: ${{ steps.target.outputs.repo }}
+          FORCE: ${{ inputs.force }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          skip() {
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$1"
+            echo "No image was built: $1" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          # Prints "<http code> <digest>"; the digest is empty unless the code is 200.
+          manifest() {
+            local headers code
+            headers=$(mktemp)
+            code=$(curl -sS -o /dev/null -D "$headers" -I \
+              -w '%{http_code}' --retry 3 --retry-delay 5 --retry-all-errors \
+              --max-time 60 \
+              -H "Authorization: Bearer $1" -H "Accept: $GHCR_ACCEPT" \
+              "https://ghcr.io/v2/$GHCR_REPO/manifests/$2" || echo 000)
+            printf '%s %s\n' "$code" \
+              "$(tr -d '\r' < "$headers" | awk 'tolower($1) == "docker-content-digest:" { print $2 }')"
+            rm -f "$headers"
+          }
+
+          retry=false
+
+          if [ "$FORCE" != "true" ]; then
+            # || true so a transport failure or a non-JSON body reaches the
+            # guard below instead of dying on pipefail with no annotation.
+            token=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors --max-time 60 \
+              -u "x:$TOKEN" \
+              "https://ghcr.io/token?scope=repository:$GHCR_REPO:pull&service=ghcr.io" \
+              | jq -r '.token // ""' || true)
+            [ -n "$token" ] \
+              || { echo "::error::could not obtain a GHCR pull token for $GHCR_REPO"; exit 1; }
+
+            read -r build_code build_digest <<<"$(manifest "$token" "$BUILD_ID")"
+            case "$build_code" in
+              404) ;; # absent, including the first run before the package exists
+              200)
+                # The immutable tag is pushed even when the smoke test fails, so
+                # its existence alone does not mean this build was handled.
+                # nightly has to point at it.
+                read -r nightly_code nightly_digest <<<"$(manifest "$token" nightly)"
+                case "$nightly_code" in
+                  200 | 404) ;;
+                  *) echo "::error::GHCR check for nightly returned $nightly_code"; exit 1 ;;
+                esac
+                if [ -n "$build_digest" ] && [ "$build_digest" = "$nightly_digest" ]; then
+                  # Nothing to do, which is the normal weekend answer. But this
+                  # build being the newest on ftp for a week means develop has
+                  # stopped producing them, and a green silent run would hide it.
+                  modified=$(curl -sSI -L --max-time 60 \
+                    "$FTP_BASE/$BUILD_ID/drop/CUBRID-$BUILD_ID-Linux.x86_64.tar.gz" \
+                    | tr -d '\r' | awk -F': ' 'tolower($1) == "last-modified" { print $2 }')
+                  age=0
+                  [ -n "$modified" ] && age=$(( ( $(date +%s) - $(date -d "$modified" +%s) ) / 86400 ))
+                  [ "$age" -le 7 ] \
+                    || { echo "::error::$BUILD_ID is still the newest build on ftp after $age days; develop has stopped producing builds"; exit 1; }
+                  skip "$BUILD_ID is already published and nightly points at it ($age days old)"
+                fi
+                # Retry the smoke test in case the recipe was fixed since, but do
+                # not overwrite the artifact that is there to be investigated.
+                retry=true
+                echo "::warning::$BUILD_ID is published but nightly does not point at it; retrying its smoke test"
+                ;;
+              *) echo "::error::GHCR check for $BUILD_ID returned $build_code"; exit 1 ;;
+            esac
+          fi
+
+          # The build directory is listed about two minutes before its files land,
+          # so a missing file usually means the run came too early. Only a clean
+          # 404 may say that. Anything else is a real problem and must fail rather
+          # than pass for an upload still in flight.
+          drop="$FTP_BASE/$BUILD_ID/drop"
+          tarball="CUBRID-$BUILD_ID-Linux.x86_64.tar.gz"
+
+          # Bounds the 404 skip. If the drop index lists a differently named
+          # engine tarball, the naming changed upstream and waiting will not help.
+          index=$(curl -sSL --max-time 60 "$drop/" || true)
+          if [ -n "$index" ] \
+             && ! printf '%s' "$index" | grep -qF "href=\"$tarball\"" \
+             && printf '%s' "$index" | grep -qE "href=\"CUBRID-$BUILD_ID-Linux[^\"]*\.tar\.gz\""; then
+            echo "::error::$drop/ does not list $tarball; the artifact naming changed"
+            exit 1
+          fi
+
+          for f in "$tarball" hash.md5 version.properties; do
+            # curl prints 000 itself on a transport failure, so no fallback here.
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -I -L \
+              --retry 3 --retry-delay 5 --retry-all-errors --max-time 60 "$drop/$f" || true)
+            case "$code" in
+              200) ;;
+              404) skip "$BUILD_ID is not fully published yet ($f is 404)" ;;
+              *) echo "::error::$drop/$f returned $code"; exit 1 ;;
+            esac
+          done
+
+          {
+            echo "build=true"
+            echo "retry=$retry"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Build and publish
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ needs.plan.outputs.image }}:${{ needs.plan.outputs.build_id }}
+      digest: ${{ steps.push.outputs.digest }}
+      smoke: ${{ steps.smoke.outcome }}
+    env:
+      BUILD_ID: ${{ needs.plan.outputs.build_id }}
+      IMAGE: ${{ needs.plan.outputs.image }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download and verify the engine package
+        shell: bash
+        run: |
+          set -euo pipefail
+          drop="$FTP_BASE/$BUILD_ID/drop"
+          tarball="CUBRID-$BUILD_ID-Linux.x86_64.tar.gz"
+          mkdir -p image/dist
+          cd image/dist
+          # --max-time is per attempt, so it has to leave room for the retries
+          # inside the job's own budget. -C - resumes rather than restarting.
+          curl -fSL --retry 3 --retry-delay 10 --retry-all-errors -C - --max-time 900 \
+            -o "$tarball" "$drop/$tarball"
+          curl -fsSL --retry 5 -O "$drop/hash.md5" -O "$drop/version.properties"
+          # Select the one line for this artifact. A grep on the build id matches
+          # five lines (.tar.gz, .sh, .rpm and both debug builds).
+          awk -v f="$tarball" '$2 == "*" f || $2 == f' hash.md5 | md5sum -c -
+          version=$(sed -n 's/^CUBRID_VERSION=//p' version.properties | tr -d '\r')
+          [ "$version" = "$BUILD_ID" ] \
+            || { echo "::error::version.properties says '$version', expected '$BUILD_ID'"; exit 1; }
+
+      - name: Build the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The source label decides which repository GHCR links the package to,
+          # and only the linked repository's token may prune it later.
+          docker build \
+            --platform linux/amd64 \
+            --build-arg "BUILD_ID=$BUILD_ID" \
+            --build-arg "ENGINE_SHA=${BUILD_ID##*-}" \
+            --label "org.opencontainers.image.source=$SERVER_URL/$REPOSITORY" \
+            -t "$IMAGE:$BUILD_ID" \
+            image
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+
+      - name: Smoke test
+        id: smoke
+        timeout-minutes: 15
+        continue-on-error: true # a failed build is still published for investigation
+        run: bash image/smoke.sh "$IMAGE:$BUILD_ID" "$BUILD_ID"
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Push the immutable tag
+        id: push
+        # On a retry the tag already holds the artifact that is there to be
+        # investigated, so only a pass may replace it.
+        if: needs.plan.outputs.retry != 'true' || steps.smoke.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$BUILD_ID"
+          digest=$(docker image inspect "$IMAGE:$BUILD_ID" --format '{{index .RepoDigests 0}}')
+          echo "digest=${digest##*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Move nightly and latest
+        if: steps.smoke.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tag in nightly latest; do
+            docker tag "$IMAGE:$BUILD_ID" "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+
+      - name: Prune old immutable versions
+        continue-on-error: true # housekeeping must never fail a good image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Once this moves to the CUBRID organisation the path becomes /orgs/.
+          api="/users/$OWNER/packages/container/$IMAGE_NAME/versions"
+          # A 404 is the legitimate "no package yet". Anything else means the
+          # prune could not even look, and must not read as nothing to prune.
+          if ! probe=$(gh api "$api?per_page=1" 2>&1); then
+            case "$probe" in
+              *"(HTTP 404)"*) echo "package $IMAGE_NAME does not exist yet, nothing to prune"; exit 0 ;;
+              *) echo "$probe"; echo "::warning::prune skipped, cannot list versions of $IMAGE_NAME"; exit 1 ;;
+            esac
+          fi
+          # Versions rank by created_at, which does not move when a tag is
+          # re-pointed. Excluding the moving tags is what stops a run of smoke
+          # failures from ageing out the image nightly still points at.
+          ids=$(gh api --paginate "$api?per_page=100" \
+                  --jq '.[] | {id, created_at, tags: (.metadata.container.tags // [])}' \
+                | jq -sr --argjson keep "$KEEP_VERSIONS" '
+                    map(select((.tags | index("nightly") | not)
+                           and (.tags | index("latest")  | not)))
+                    | sort_by(.created_at) | reverse | .[$keep:] | .[].id')
+          count=$(printf '%s' "$ids" | grep -c . || true)
+          echo "::notice::$count versions over the keep-$KEEP_VERSIONS limit"
+          for id in $ids; do
+            gh api --method DELETE "$api/$id" >/dev/null \
+              && echo "deleted version $id" \
+              || echo "::warning::could not delete version $id"
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          SMOKE: ${{ steps.smoke.outcome }}
+          REF_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| build | \`$BUILD_ID\` |"
+            echo "| image | \`$IMAGE:$BUILD_ID\` |"
+            echo "| smoke test | $SMOKE |"
+            echo "| nightly moved | $([ "$SMOKE" = success ] && echo yes || echo no) |"
+            echo "| workflow ref | \`$REF_NAME\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report a failed smoke test
+        if: steps.smoke.outcome == 'failure'
+        run: |
+          echo "::error::smoke test failed for $BUILD_ID; nightly was not moved"
+          exit 1
