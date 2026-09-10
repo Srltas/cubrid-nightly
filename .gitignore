@@ -1,0 +1,6 @@
+# Rendered document previews, produced locally from docs/src/.
+preview/
+
+# Anything a local run leaves behind next to the image definition.
+image/dist/*
+!image/dist/.gitignore
