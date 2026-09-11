@@ -37,8 +37,8 @@ ftp.cubrid.org  ->  GitHub Actions  ->  ghcr.io/srltas/cubrid-nightly
 ```
 
 Each run resolves the newest build, verifies it against the drop's `hash.md5`,
-builds the image, smoke tests it, and publishes. A run with nothing to do exits
-in about twenty seconds.
+builds the image, smoke tests it, and publishes. Measured: about 4m30s when
+there is a new build, about 10s when there is not.
 
 A green run is silent, so only a definite answer is allowed to end a run
 quietly. An unreachable registry, an unexpected ftp status, or an index whose
@@ -70,6 +70,12 @@ picks that jar up. Neither needs a change to the suite's own repository.
 
 ## Operating notes
 
+- **The publishing repository needs write access on the package.** GHCR grants
+  that automatically only to the repository that first published it, so a
+  package published from somewhere else has to be granted access once, under
+  the package's *Package settings -> Manage Actions access*. Without it the
+  run gets through build and smoke test and then fails with
+  `denied: permission_denied: write_package`.
 - Retention keeps the 15 newest immutable versions. Whatever `nightly` and
   `latest` point at is excluded explicitly. Version rank is by first-publish
   time, which does not move when a tag is re-pointed, so a plain "keep N"
@@ -79,3 +85,7 @@ picks that jar up. Neither needs a change to the suite's own repository.
   resets that clock.
 - GitHub Actions minutes and public GHCR storage are free. Keeping this
   repository public is what makes that true.
+- GitHub only indexes workflow files that appear in a push diff. Files pushed
+  as part of `gh repo create --push` are not registered, and the workflow
+  stays invisible to `gh workflow run` with no error anywhere. Touching the
+  file and pushing again fixes it.

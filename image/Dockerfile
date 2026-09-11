@@ -1,6 +1,6 @@
 # CUBRID develop nightly image. CI only. Not a release.
 # The pipeline downloads the engine package into dist/ before building.
-#   docker build -t <image> --build-arg BUILD_ID=<id> --build-arg ENGINE_SHA=<sha> nightly
+#   docker build -t <image> --build-arg BUILD_ID=<id> --build-arg ENGINE_SHA=<sha> image
 
 FROM rockylinux/rockylinux:8.10@sha256:e8a49c5403b687db05d4d67333fa45808fbe74f36e683cec7abb1f7d0f2338c6 AS extract
 ADD dist/CUBRID-*.tar.gz /extract/
